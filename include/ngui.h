@@ -76,9 +76,19 @@ private:
 class Texture
 {
 public:
+	Texture()
+		: texture(nullptr)
+	{}
+
 	Texture(SDL_Texture *texture)
 		: texture(texture, SDL_DestroyTexture)
 	{}
+
+	operator bool()
+	{
+		// ternary operator necessary to coerce to bool
+		return texture ? true : false;
+	}
 
 private:
 	friend class Renderer;
@@ -138,6 +148,9 @@ private:
 class Widget
 {
 public:
+	virtual ~Widget()
+	{}
+	
 	virtual void render(Box boundingBox, Renderer &renderer);
 
 	template <typename T>

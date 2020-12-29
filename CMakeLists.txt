@@ -7,7 +7,7 @@ set(COMPILE_OPTIONS COMPILE_OPTIONS -g)
 
 include_directories(include)
 
-add_library(ngui include/ngui.h ui/ngui.cpp)
+add_library(ngui include/ngui.h ui/ngui.cpp ui/image.cpp)
 target_link_libraries(ngui SDL2 SDL2_image)
 
 add_executable(test-ngui test/main.cpp)
