@@ -26,6 +26,7 @@ void Application::addWindow(Window *win)
 	windows.push_back(win);
 }
 
+[[noreturn]]
 void Application::mainLoop()
 {
 	while (true)
@@ -36,6 +37,38 @@ void Application::mainLoop()
 		}
 		// For debugging
 		SDL_Delay(100);
+	}
+}
+
+Widget *Application::fromFile(const char *path)
+{
+	pugi::xml_document document;
+	pugi::xml_parse_result res = document.load_file(path);
+	if (!res)
+	{
+		throw std::invalid_argument("Could not load widget from path");
+	}
+	return widgetFromMarkup(document.root().first_child());
+}
+
+Widget *Application::widgetFromMarkup(pugi::xml_node doc)
+{
+	std::cerr << doc.name() << std::endl;
+	auto *widget = widgetByName<Widget>(doc.name());
+	populateFromMarkup(widget, doc);
+	return widget;
+}
+
+void Application::populateFromMarkup(Widget *widget, pugi::xml_node doc)
+{
+	for (auto &attr : doc.attributes())
+	{
+		widget->set(attr.name(), attr.value());
+	}
+
+	for (auto &child : doc.children())
+	{
+		widget->addChild(widgetFromMarkup(child));
 	}
 }
 
@@ -103,7 +136,7 @@ Texture Renderer::loadImage(const char *path)
 	return Texture(texture);
 }
 
-void Renderer::texture(Texture texture, Box at)
+void Renderer::texture(const Texture &texture, Box at)
 {
 	SDL_Rect dest = at.toSDLRect();
 
@@ -124,8 +157,8 @@ void Window::update()
 
 Size Window::getSize()
 {
-	Size size;
-	SDL_GetWindowSize(window, &size.w, &size.h);
+	Size size = {0};
+	SDL_GetRendererOutputSize(renderer->renderer, &size.w, &size.h);
 	return size;
 }
 
@@ -133,7 +166,7 @@ void Widget::render(Box boundingBox, Renderer &renderer)
 {
 	renderer.rect(boundingBox, Color(255, 255, 255));
 
-	for (auto c : children)
+	for (const auto &c : children)
 		c->render(boundingBox, renderer);
 }
 

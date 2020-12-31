@@ -1,19 +1,17 @@
 #include <image.h>
+#include <iostream>
 
 namespace ng::ui
 {
 
-void Image::setImage(const char *path)
-{
-	imagePath = path;
-	textureLoaded = false;
-}
-
 void Image::render(Box boundingBox, Renderer &renderer)
 {
+	std::cerr << boundingBox.w << " " << boundingBox.h << std::endl;
+
 	if (!textureLoaded)
 	{
-		texture = renderer.loadImage(imagePath.c_str());
+		auto img = get<std::string>("src");
+		texture = renderer.loadImage(img.c_str());
 		textureLoaded = true;
 	}
 

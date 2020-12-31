@@ -1,9 +1,13 @@
 #pragma once
 
 #include <list>
+#include <unordered_map>
 #include <memory>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
+#include <functional>
+#include <utility>
+#include <pugixml.hpp>
 
 namespace ng::ui
 {
@@ -67,10 +71,36 @@ public:
 	Application();
 	~Application();
 	void addWindow(Window *win);
+
+	[[noreturn]]
 	void mainLoop();
+
+	template <typename T>
+	void registerWidget(std::string name)
+	{
+		constructors[std::move(name)] = []() -> Widget *
+		{
+			return dynamic_cast<Widget *>(new T);
+		};
+	}
+
+	template <typename T>
+	T *widgetByName(const std::string &name)
+	{
+		if (constructors.find(name) == constructors.end())
+		{
+			throw std::invalid_argument("Cannot find widget with name '" + name + "'");
+		}
+		return dynamic_cast<T *>(constructors[name]());
+	}
+
+	Widget *fromFile(const char *path);
+	Widget *widgetFromMarkup(pugi::xml_node doc);
+	void populateFromMarkup(Widget *widget, pugi::xml_node doc);
 
 private:
 	std::list<Window *> windows;
+	std::unordered_map<std::string, std::function<Widget *(void)>> constructors;
 };
 
 class Texture
@@ -80,14 +110,14 @@ public:
 		: texture(nullptr)
 	{}
 
-	Texture(SDL_Texture *texture)
+	explicit Texture(SDL_Texture *texture)
 		: texture(texture, SDL_DestroyTexture)
 	{}
 
 	operator bool()
 	{
 		// ternary operator necessary to coerce to bool
-		return texture ? true : false;
+		return static_cast<bool>(texture);
 	}
 
 private:
@@ -107,11 +137,13 @@ public:
 	virtual ~Renderer();
 	virtual void rect(Box at, Color color);
 	virtual Texture loadImage(const char *file);
-	virtual void texture(Texture texture, Box at);
+	virtual void texture(const Texture &texture, Box at);
 	virtual void clear();
 	virtual void present();
 
 private:
+	friend class Window;
+
 	Window *window;
 	SDL_Renderer *renderer;
 };
@@ -128,11 +160,16 @@ public:
 	T &centralWidget()
 	{
 		if (central)
-			return *reinterpret_cast<T *>(central);
+			return *dynamic_cast<T *>(central);
 
 		T *widget = new T;
-		central = reinterpret_cast<Widget *>(widget);
+		central = dynamic_cast<Widget *>(widget);
 		return *widget;
+	}
+
+	void setCentralWidget(Widget *widget)
+	{
+		central = widget;
 	}
 
 	void update();
@@ -145,24 +182,110 @@ private:
 	SDL_Window *window = nullptr;
 };
 
+class Property
+{
+public:
+	Property() = default;
+
+	explicit Property(std::string value)
+		: value(std::move(value))
+	{}
+
+	Property &operator=(std::string other)
+	{
+		value = std::move(other);
+		changed();
+		return *this;
+	}
+
+	Property &operator=(int other)
+	{
+		value = std::to_string(other);
+		changed();
+		return *this;
+	}
+
+	Property &operator=(bool other)
+	{
+		value = std::to_string(other);
+		changed();
+		return *this;
+	}
+
+	explicit operator bool()
+	{
+		return value.length() > 0 && value != "false";
+	}
+
+	explicit operator int()
+	{
+		return std::stoi(value);
+	}
+
+	explicit operator std::string()
+	{
+		return value;
+	}
+
+	void onChange(std::function<void (std::string)> listener)
+	{
+		listeners.push_back(std::move(listener));
+	}
+
+private:
+	std::string value;
+	std::list<std::function<void (std::string)>> listeners;
+
+	void changed()
+	{
+		for (const auto &f : listeners)
+		{
+			f(value);
+		}
+	}
+};
+
 class Widget
 {
 public:
-	virtual ~Widget()
-	{}
+	virtual ~Widget() = default;
 	
 	virtual void render(Box boundingBox, Renderer &renderer);
 
 	template <typename T>
-	T &addChild()
+	T &newChild()
 	{
 		T *child = new T;
-		children.push_back(std::shared_ptr(reinterpret_cast<Widget *>(child)));
+		children.push_back(std::shared_ptr<Widget>(dynamic_cast<Widget *>(child)));
 		return *child;
+	}
+
+	template <typename T>
+	void addChild(T *child)
+	{
+		children.push_back(std::shared_ptr<Widget>(dynamic_cast<Widget *>(child)));
+	}
+
+	void set(const std::string &key, std::string val)
+	{
+		properties[key] = std::move(val);
+	}
+
+	void onChange(const std::string &key, std::function<void (std::string)> f)
+	{
+		properties[key].onChange(std::move(f));
 	}
 
 private:
 	std::list<std::shared_ptr<Widget>> children;
+	std::unordered_map<std::string, Property> properties;
+
+protected:
+	template <typename T>
+	T get(const std::string &key)
+	{
+		return static_cast<T>(properties[key]);
+	}
 };
 
 } // ng::ui
