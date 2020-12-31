@@ -33,18 +33,37 @@ inline bool isWhitespace(char c)
 }
 
 // Terrible
+inline bool isControlCharacterExcludeComment(char c)
+{
+	return c == QDF_LIST_BEGIN
+		|| c == QDF_LIST_END
+		|| c == QDF_SUBBLOCK_BEGIN
+		|| c == QDF_SUBBLOCK_END
+		|| c == QDF_STRING_CONTAINER;
+}
+
+// Terrible
 inline bool isControlCharacter(const char* c)
 {
 	char v = *c;
-	return v == QDF_LIST_BEGIN
-		|| v == QDF_LIST_END
-		|| v == QDF_SUBBLOCK_BEGIN
-		|| v == QDF_SUBBLOCK_END
-		|| v == QDF_STRING_CONTAINER
+	return isControlCharacterExcludeComment(v)
 		|| strncmp(c, QDF_COMMENT, sizeof(QDF_COMMENT) - 1) == 0
 		|| strncmp(c, QDF_MULTILINE_COMMENT_BEGIN, sizeof(QDF_MULTILINE_COMMENT_BEGIN) - 1) == 0;
 		// End of multiline is only considered for the actual comment
 }
+
+
+struct QDFToken : public QDF::String
+{
+	QDFToken* parent = nullptr;
+	QuickWriteList<QDFToken>::Location skip = { 0,0 };
+};
+
+inline bool isChar(QDFToken* tok, char c)
+{
+	return tok->len == 1 && *tok->str == c;
+}
+
 
 // Could be merged into QDFParser directly, but oh well
 // Wrapper over qdf's input with helper utils 
@@ -107,10 +126,10 @@ public:
 		return *cur;
 	}
 
-	QDF::String readString()
+	QDFToken readString()
 	{
 
-		QDF::String str{0,0};
+		QDFToken str{0,0};
 
 
 		if (!valid())
@@ -202,23 +221,20 @@ public:
 
 		root = new QDFRoot();
 		root->values = nullptr;
-		error = parse(root, &qdfList);
+		error = prospect();
+		if (error != QDFParseError::NONE)
+			return;
 
-		if (error == QDFParseError::NONE)
-		{
-			buildAllData();
-
-			if (qdfArrayPos > qdfList.count() || stringArrayPos > strList.count() || stringBufferPos > charCount)
-				error = QDFParseError::DATA_BUILD_ERROR;
-		}
-
-		if (error == QDFParseError::NONE)
-		{
-			// No error! Finalize by linking up our root
-			root->stringArray = stringArray;
-			root->stringBuffer = stringBuffer;
-			root->qdfArray = qdfArray;
-		}
+		// Allocate all of our resources
+		root->qdfArray = qdfArrayPos = qdfArray = (QDF*)malloc(sizeof(QDF) * qdfCount);
+		root->stringArray = stringArrayPos = stringArray = (QDF::String*)malloc(sizeof(QDF::String) * strCount);
+		root->stringBuffer = stringBufferPos = stringBuffer = (char*)malloc(sizeof(char) * charCount);
+		
+		root->children = qdfArrayPos;
+		tokenList.resetHead();
+		error = parse(root);
+		if (error != QDFParseError::NONE)
+			return;
 	}
 
 	void erase()
@@ -234,61 +250,61 @@ public:
 
 	void readString()
 	{
-		QDF::String str = in.readString();
+		QDFToken str = in.readString();
 		charCount += str.len + 1; // One extra for a zero at the end
-		*strList.add() = str;
+		strCount++;
+		*tokenList.add() = str;
 	}
 
-	QDFParseError parse(QDF* parent, QuickWriteList<QDF>* qdfList)
+	// Light parse/tokenize and count
+	QDFParseError prospect()
 	{
-		// To attempt to order our data for less allocations, we're going to try to hold onto qdf lists until later
-		QuickWriteList<QuickWriteList<QDF>> qdfWriteLists;
+		size_t strCount  = 0;
+
+		QDFToken* parent = nullptr;
 
 		for (; in.skip() && in.valid();)
 		{
-
-			// Are we ending our block?
+			// End of subblock?
 			if (*in.cur == QDF_SUBBLOCK_END)
 			{
-				if (parent == root)
+				if (parent)
 				{
-					// Parent isn't a subblock; it's root and this is a syntax error...
+					// Add token and skip over the end
+					QDFToken* end = tokenList.add();
+					*end = { in.cur++, 1, parent, parent->skip };
+				
+					parent->skip = tokenList.endLocation();
+					parent = parent->parent;
+				}
+				else
+				{
 					return QDFParseError::UNEXPECTED_END_OF_SUBBLOCK;
 				}
-
-				// Skip the end char
-				in.cur++;
-
-				// Before we can end, we have to tack on all of our qdfs
-				for (auto wl = qdfWriteLists.begin(); wl; wl = qdfWriteLists.next())
-				{
-					qdfList->merge(*wl);
-				}
-
-				return QDFParseError::NONE;
+				continue;
 			}
 
-			// In this code, you'll see lots of references to just putting strings into a list.
-			// Don't worry about it, we'll figure out where they belong later.
-
-			QDF* qdf = qdfList->add();
-
-			// Read key
-			readString();
+			// Get the key
+			// Keys count towards the char count, but not towards the str count
+			QDFToken key = in.readString();
+			charCount += key.len + 1; // One extra for a zero at the end
+			*tokenList.add() = key;
 			if (in.error != QDFParseError::NONE) return in.error;
+
 
 			// Read values
 
 			// Is our value a list?
 			if (in.skip() == QDF_LIST_BEGIN)
 			{
-				qdf->valueCount = 0;
+				// Add start list token and skip over the char
+				*tokenList.add() = { in.cur++, 1 };
+
 				// Skip over the list begin char and loop until and end of list
-				for (in.cur++; in.valid() && in.skip() != QDF_LIST_END; )
+				for (; in.valid() && in.skip() != QDF_LIST_END; )
 				{
 					readString();
 					if (in.error != QDFParseError::NONE) return in.error;
-					qdf->valueCount++;
 				}
 
 				if (*in.cur != QDF_LIST_END)
@@ -296,108 +312,187 @@ public:
 					// If our cur isn't end, we broke due to being invalid. Syntax error!
 					return QDFParseError::UNCLOSED_LIST;
 				}
-				
-				// Skip the end char
-				in.cur++;
+
+				// Add end list token and skip over the char
+				*tokenList.add() = { in.cur++, 1 };
 			}
-			else
+			else if (*in.cur != QDF_SUBBLOCK_BEGIN)
 			{
 				// Not a list, so we just have one value
-				qdf->valueCount = 1;
 				readString();
 				if (in.error != QDFParseError::NONE) return in.error;
 			}
 
+			// We've got one full qdf at this point. Up the count
+			qdfCount++;
+
 			// Read subblock
-			qdf->childCount = 0;
 			if (in.skip() == QDF_SUBBLOCK_BEGIN)
 			{
-				// We've got a subblock. Skip a char and recursively parse
-				in.cur++;
-				parse(qdf, qdfWriteLists.add());
+				QDFToken* begin = tokenList.add();
+				// We store our loc so that our end can skip back to the start
+				*begin = { in.cur++, 1, parent, tokenList.endLocation() };
+				parent = begin;
 			}
 
+		}
+		return QDFParseError::NONE;
+	}
+	QDFParseError parse(QDF* parent)
+	{
+
+		for (QDFToken* tok = tokenList.cur(); tok;)
+		{
+			// Are we ending our block?
+			if (isChar(tok, QDF_SUBBLOCK_END))
+			{
+				if (parent == root)
+				{
+					// Parent isn't a subblock; it's root and this is a syntax error...
+					return QDFParseError::UNEXPECTED_END_OF_SUBBLOCK;
+				}
+
+				auto loc = tokenList.location();
+				for (size_t i = 0; i < parent->childCount; i++)
+				{
+					QDF* q = &parent->children[i];
+					if (q->children)
+					{
+						// Access our cheesy memory hack from earlier.
+						tokenList.setLocation(*reinterpret_cast<QuickWriteList<QDFToken>::Location*>(q->children));
+						tokenList.next();
+
+						q->children = qdfArrayPos;
+						parse(q);
+					}
+				}
+				tokenList.setLocation(loc);
+				tokenList.next();
+
+				return QDFParseError::NONE;
+			}
+
+			if (!tok && parent != root)
+				return QDFParseError::UNCLOSED_SUBBLOCK;
+
+			QDF* qdf = qdfArrayPos++;
+
+			// Read key
+			qdf->key = *copyInPlace(tok);
+
+			tok = tokenList.next();
+			if (!tok)
+				return QDFParseError::UNEXPECTED_END_OF_FILE;
+
+			// Read values
+			
+			// Is our value a list?
+			if (isChar(tok, QDF_LIST_BEGIN))
+			{
+				qdf->valueCount = 0;
+				qdf->values = stringArrayPos;
+				// Skip over the list begin char and loop until and end of list
+				for (tok = tokenList.next(); tok && !isChar(tok, QDF_LIST_END); tok = tokenList.next())
+				{
+					*(stringArrayPos++) = *copyInPlace(tok);
+					qdf->valueCount++;
+				}
+				if (!tok || !isChar(tok, QDF_LIST_END))
+				{
+					return QDFParseError::UNCLOSED_LIST;
+
+				}
+				tok = tokenList.next();
+			}
+			else if(!isChar(tok, QDF_SUBBLOCK_BEGIN))
+			{
+				// Not a list, so we just have one value
+				qdf->valueCount = 1;
+				qdf->values = stringArrayPos;
+				*(stringArrayPos++) = *copyInPlace(tok);
+				tok = tokenList.next();
+			}
+			else
+			{
+				qdf->valueCount = 0;
+				qdf->values = nullptr;
+			}
+			// Read subblock
+			qdf->childCount = 0;
+			qdf->children = nullptr;
+			if (tok)
+			{
+				if (isChar(tok, QDF_SUBBLOCK_BEGIN))
+				{
+					
+					// Skip to after the subblock
+					tokenList.setLocation(tok->skip);
+
+					// Cheesy memory save hack.
+					qdf->children = reinterpret_cast<QDF*>(&tokenList.cur()->skip);
+
+					tok = tokenList.next();
+
+
+				}
+			}
+			else if (parent != root)
+				return QDFParseError::UNCLOSED_SUBBLOCK;
 			parent->childCount++;
 		}
 
-		// Before we can end, we have to tack on all of our qdfs
-		for (auto wl = qdfWriteLists.begin(); wl; wl = qdfWriteLists.next())
+		// If our parent wasn't root, and we got here, that's an unclosed subblock. Syntax error!
+		if (parent != root)
+			return QDFParseError::UNCLOSED_SUBBLOCK;
+
+		for (size_t i = 0; i < parent->childCount; i++)
 		{
-			qdfList->merge(*wl);
+			QDF* q = &parent->children[i];
+			if (q->children)
+			{
+				// Access our cheesy memory hack from earlier.
+				tokenList.setLocation(*reinterpret_cast<QuickWriteList<QDFToken>::Location*>(q->children));
+				tokenList.next();
+				q->children = qdfArrayPos;
+				parse(q);
+			}
 		}
 
-		// If our parent wasn't root, and we got here, that's an unclosed subblock. Syntax error!
-		if (parent == root)
-			return QDFParseError::NONE;
-		else
-			return QDFParseError::UNCLOSED_SUBBLOCK;
+		return QDFParseError::NONE;
 	}
 	
-	void buildAllData()
+	QDF::String* copyInPlace(QDFToken* str)
 	{
-		// We've got a list of strings and counts. Now we need to compact down this data and link it up correctly...
-		stringBuffer = (char*)malloc(charCount);
-		stringBufferPos = 0;
-		stringArray = strList.compact();
-		qdfArray = qdfList.compact();
-
-		buildData(root);
-	}
-
-	void buildData(QDF* qdf)
-	{
-		// Loop over our current pos in our arrays and link up our data
-		qdf->children = qdfArray + qdfArrayPos;
-		qdfArrayPos += qdf->childCount;
-		
-		if (qdf != root)
-		{
-			// Copy in strings
-			qdf->key = copyInPlace(&stringArray[stringArrayPos++]);
-			
-			// Copy in values
-			qdf->values = stringArray + stringArrayPos;
-			stringArrayPos += qdf->valueCount;
-			for (size_t i = 0; i < qdf->valueCount; i++)
-				 copyInPlace(&qdf->values[i]);
-		}
-
-		for (size_t i = 0; i < qdf->childCount; i++)
-		{
-			buildData(&qdf->children[i]);
-		}
-	}
-
-	QDF::String* copyInPlace(QDF::String* str)
-	{
-		memcpy(stringBuffer + stringBufferPos, str->str, str->len);
-		str->str = stringBuffer + stringBufferPos;
+		memcpy(stringBufferPos, str->str, str->len);
+		str->str = stringBufferPos;
 		stringBufferPos += str->len;
-		stringBuffer[stringBufferPos] = 0;
+		*stringBufferPos = 0;
 		stringBufferPos++;
 
 		return str;
 	}
 
 	QDFParseError error;
+	QDFInput in;
 
 	QDFRoot* root;
 	
-	QDFInput in;
-
-	QuickWriteList<QDF::String> strList;
-	QuickWriteList<QDF> qdfList;
+	QuickWriteList<QDFToken> tokenList = QuickWriteList<QDFToken>(8, 0, 2, 128);
 
 	// Total count of chars in all strings
 	size_t charCount;
+	// Total count of all strings
+	size_t strCount;
+	// Total count of all qdfs
+	size_t qdfCount;
 
 	// Data building
 	char* stringBuffer;
-	size_t stringBufferPos;
+	char* stringBufferPos;
 	QDF::String* stringArray;
-	size_t stringArrayPos;
+	QDF::String* stringArrayPos;
 	QDF* qdfArray;
-	size_t qdfArrayPos;
+	QDF* qdfArrayPos;
 };
 
 
@@ -432,4 +527,3 @@ QDF* QDF::parse(const char* str, size_t length, QDFParseError& error)
 		return nullptr;
 	}
 }
-
