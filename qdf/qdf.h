@@ -1,7 +1,19 @@
 #pragma once
-
+#include <cstdint>
+#include <string_view>
+#include "iterarray.h"
 
 namespace ng::qdf{
+
+	/* QDF File Parser
+	 *  - Example of using this parser:
+	 *		
+	 *		QDFParseError error;
+	 *		QDFRoot qdf;
+	 *		qdf.fromFile(error, "my/cool/file.qdf");
+	 *		for (QDF& kid : qdf.children)
+	 *			std::cout << kid.key;
+	 */
 
 	enum class QDFParseError
 	{
@@ -16,32 +28,40 @@ namespace ng::qdf{
 		UNEXPECTED_END_OF_SUBBLOCK,
 		UNEXPECTED_END_OF_LIST,
 
-		DATA_BUILD_ERROR,
+		DATA_ALREADY_PARSED,
 	};
+	
+	
 	
 	class QDF
 	{
 	public:
 
-		// Should this be here?
-		struct String
-		{
-			const char* str;
-			size_t len;
-		};
-
-		static QDF* parse(const char* str, QDFParseError& error);
-		static QDF* parse(const char* str, size_t length, QDFParseError& error);
-
+		typedef std::string_view String;
+		
 		String key;
 
-		size_t valueCount;
-		String* values;
+		IterArray<QDF::String> values;
+		IterArray<QDF> children;
 
-		QDF* children;
-		size_t childCount;
-
+	protected:
+		// You shouldn't be creating qdfs by hand!
+		QDF() {}
 	};
 
+	class QDFRoot : public QDF
+	{
+	public:
+		QDFRoot();
+		~QDFRoot();
+		
+		void fromString(QDFParseError& error, const char* str, size_t length = SIZE_MAX);
+		void fromFile(QDFParseError& error, const char* path);
+	
+	private:
+		char* stringBuffer;
+		QDF::String* stringArray;
+		QDF* qdfArray;
+	};
 
 };

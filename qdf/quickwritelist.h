@@ -19,6 +19,16 @@ namespace ng::qdf {
 		public:
 			Block* walkingBlock;
 			size_t walkingPos;
+
+			T* next();
+			T* prev();
+			T* cur();
+
+			Location& operator++() { next(); return *this; }
+			Location operator++(int) { Location tmp{ walkingBlock, walkingPos }; operator++(); return tmp; }
+			bool operator==(const Location& rhs) const { return walkingPos == rhs.walkingPos && walkingBlock == rhs.walkingBlock; }
+			bool operator!=(const Location& rhs) const { return walkingPos != rhs.walkingPos || walkingBlock != rhs.walkingBlock; }
+			T& operator*() { return *cur(); }
 		};
 
 		// Block size is the initial size of a block
@@ -48,13 +58,13 @@ namespace ng::qdf {
 
 		size_t count() { return elementCount; };
 
-		T* begin() { if (firstBlock->next && firstBlock->next->count > 0) return firstBlock->next->elements; return nullptr; }
-		T* end() { if (currentBlock->count > 0) return currentBlock->elements + currentBlock->count - 1; if (currentBlock->prev) return currentBlock->prev->elements + currentBlock->prev->count - 1; return nullptr; }
+		Location begin() { Location l{ firstBlock, 0 }; if (firstBlock->next && firstBlock->next->count > 0) l.walkingBlock = firstBlock->next; return l; }
+		Location end() { return { currentBlock, currentBlock->count }; }
 		
 		T* prev();
 		T* next();
 
-		T* cur() { return &loc.walkingBlock->elements[loc.walkingPos]; }
+		T* cur() { return loc.cur(); }
 
 		void resetHead() { loc.walkingBlock = firstBlock->next ? firstBlock->next : firstBlock; loc.walkingPos = 0; }
 
@@ -279,18 +289,7 @@ namespace ng::qdf {
 	template<typename T>
 	inline T* QuickWriteList<T>::prev()
 	{
-		loc.walkingPos--;
-		if (loc.walkingPos < 0)
-		{
-			if (loc.walkingBlock->next)
-			{
-				loc.walkingPos = 0;
-				loc.walkingBlock = loc.walkingBlock->next;
-			}
-			else
-				return nullptr;
-		}
-		return &loc.walkingBlock->elements[loc.walkingPos];
+		return loc.prev();
 	}
 
 	template<typename T>
@@ -303,18 +302,7 @@ namespace ng::qdf {
 			else
 				return nullptr;
 
-		loc.walkingPos++;
-		while (loc.walkingPos >= loc.walkingBlock->count)
-		{
-			if (loc.walkingBlock->next)
-			{
-				loc.walkingPos = 0;
-				loc.walkingBlock = loc.walkingBlock->next;
-			}
-			else
-				return nullptr;
-		}
-		return &loc.walkingBlock->elements[loc.walkingPos];
+		return loc.next();
 	}
 
 	template<typename T>
@@ -329,6 +317,48 @@ namespace ng::qdf {
 		}
 
 		currentBlock = currentBlock->next = new Block(curBlockSize, currentBlock);
+	}
+
+	template<typename T>
+	inline T* QuickWriteList<T>::Location::next()
+	{
+		walkingPos++;
+		while (walkingPos >= walkingBlock->count)
+		{
+			if (walkingBlock->next)
+			{
+				walkingPos = 0;
+				walkingBlock = walkingBlock->next;
+			}
+			else
+				return nullptr;
+		}
+		return &walkingBlock->elements[walkingPos];
+	}
+
+	template<typename T>
+	inline T* QuickWriteList<T>::Location::prev()
+	{
+		walkingPos--;
+		if (walkingPos < 0)
+		{
+			if (walkingBlock->prev)
+			{
+				walkingBlock = walkingBlock->prev;
+				walkingPos = walkingBlock->count - 1;
+			}
+			else
+				return nullptr;
+		}
+		return &walkingBlock->elements[walkingPos];
+	}
+
+	template<typename T>
+	inline T* QuickWriteList<T>::Location::cur()
+	{
+		if(walkingPos < walkingBlock->count)
+			return &walkingBlock->elements[walkingPos];
+		return nullptr;
 	}
 
 };
